@@ -2,7 +2,7 @@ const express = require('express');
 const cors    = require('cors');
 
 const app = express();
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '4mb' }));
 
 const allowedOrigins = [
   'https://thebiglaw.github.io',
@@ -38,26 +38,30 @@ app.post('/api/chat', async function (req, res) {
       return res.status(400).json({ error: 'Campo "messages" ausente ou inválido.' });
     }
 
-    // Converte mensagens para o formato nativo do Gemini
-    // O system prompt vira uma parte da primeira mensagem user
     const systemText = req.body.system || '';
+    const messages   = req.body.messages;
 
-    const contents = req.body.messages.map(function (m, index) {
-      let text = m.content;
-      // Injeta o system prompt no início da primeira mensagem do usuário
+    // ── Monta o array contents para o Gemini ──────────────────────────────
+    // O Gemini não aceita mensagens "system" diretamente no array contents.
+    // Injetamos o system prompt como primeira instrução, apenas na primeira
+    // mensagem do usuário (evita reenvio gigante em cada turno).
+    const contents = messages.map(function (m, index) {
+      let text = m.content || '';
+
       if (index === 0 && m.role === 'user' && systemText) {
-        text = systemText + '\n\n---\n\n' + text;
+        text = '=== INSTRUÇÕES DO SISTEMA ===\n' + systemText + '\n\n=== MENSAGEM DO USUÁRIO ===\n' + text;
       }
+
       return {
         role:  m.role === 'assistant' ? 'model' : 'user',
         parts: [{ text: text }]
       };
     });
 
-    // Usa a API nativa do Gemini (mais estável que o endpoint OpenAI-compat)
+    // ── Chamada à API nativa do Gemini ────────────────────────────────────
     const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=' + apiKey;
 
-    const response = await fetch(url, {
+    const geminiRes = await fetch(url, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -69,37 +73,62 @@ app.post('/api/chat', async function (req, res) {
       })
     });
 
-    const data = await response.json();
+    const data = await geminiRes.json();
 
-    // Log completo do erro para diagnóstico
-    if (!response.ok) {
-      const errDetail = JSON.stringify(data);
-      console.error('Erro do Gemini (status ' + response.status + '):', errDetail);
-      return res.status(response.status).json({
-        error: 'Gemini retornou erro ' + response.status + ': ' + errDetail
-      });
+    // ── Tratamento de erros ───────────────────────────────────────────────
+    if (!geminiRes.ok) {
+      const status  = geminiRes.status;
+      const errMsg  = data?.error?.message || JSON.stringify(data);
+
+      console.error('Erro Gemini ' + status + ':', errMsg);
+
+      let userFacing = '';
+
+      if (status === 429) {
+        userFacing =
+          'Limite de requisições do Gemini atingido (erro 429). ' +
+          'O plano gratuito permite 15 req/min e 1.500 req/dia. ' +
+          'Aguarde 1 minuto e tente novamente.';
+      } else if (status === 400) {
+        userFacing = 'Requisição inválida para o Gemini (400): ' + errMsg;
+      } else if (status === 403) {
+        userFacing = 'Chave de API inválida ou sem permissão (403). Verifique GEMINI_API_KEY no Render.';
+      } else if (status === 404) {
+        userFacing = 'Modelo não encontrado (404). Verifique o nome do modelo no servidor.';
+      } else {
+        userFacing = 'Gemini retornou erro ' + status + ': ' + errMsg;
+      }
+
+      return res.status(status).json({ error: userFacing });
     }
 
-    // Extrai o texto da resposta
+    // ── Extrai texto da resposta ──────────────────────────────────────────
     const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
 
     if (!text) {
-      console.error('Resposta vazia do Gemini:', JSON.stringify(data));
-      return res.status(500).json({ error: 'Gemini retornou resposta vazia. Dados: ' + JSON.stringify(data) });
+      // Pode ser bloqueio por safety filters
+      const blockReason = data?.promptFeedback?.blockReason || '';
+      const finishReason = data?.candidates?.[0]?.finishReason || '';
+      console.error('Resposta vazia. blockReason:', blockReason, 'finishReason:', finishReason);
+      return res.status(500).json({
+        error: 'Gemini retornou resposta vazia.' +
+               (blockReason ? ' Motivo de bloqueio: ' + blockReason : '') +
+               (finishReason ? ' Fim por: ' + finishReason : '')
+      });
     }
 
-    // Retorna no formato Anthropic que o app.js já sabe parsear
+    // ── Retorna no formato que o app.js já sabe parsear ───────────────────
     res.json({
       content: [{ type: 'text', text: text }]
     });
 
   } catch (error) {
-    console.error('Erro no servidor:', error);
-    res.status(500).json({ error: 'Erro interno: ' + error.message });
+    console.error('Erro interno:', error);
+    res.status(500).json({ error: 'Erro interno do servidor: ' + error.message });
   }
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, function () {
-  console.log('Servidor NeuroEquilíbrio na porta ' + PORT + ' — Gemini 2.0 Flash');
+  console.log('NeuroEquilíbrio API na porta ' + PORT + ' — Gemini 2.0 Flash');
 });
