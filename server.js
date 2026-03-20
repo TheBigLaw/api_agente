@@ -22,6 +22,49 @@ app.use(cors({
   optionsSuccessStatus: 200
 }));
 
+// ── System prompt embutido no servidor ───────────────────────────────────────
+// Versão compacta mas completa para não estourar tokens do Gemini gratuito
+const NEURO_SYSTEM = `Você é o Dr. NeuroEquilíbrio, neuropsicólogo clínico sênior com 28 anos de experiência. Analise testes neuropsicológicos com rigor clínico, ancorando sempre nos escores específicos.
+
+PONTUAÇÕES:
+- PP (subtestes): média=10 DP=3. ≥17=Muito Superior, 15-16=Superior, 13-14=Médio-Alto, 8-12=Médio, 6-7=Médio-Baixo, 4-5=Limítrofe, ≤3=Deficiente
+- QI/Compostos: média=100 DP=15. ≥130=MS, 120-129=Sup, 110-119=MS, 90-109=Médio, 80-89=MI, 70-79=Limítrofe, ≤69=EB
+- Escore T: média=50 DP=10. T>65=significativo, T>70=muito significativo
+- Percentil: <5=MB, 5-9=Baixo, 10-25=MdB, 26-74=Médio, 75-90=MdA, >95=MA
+
+INSTRUMENTOS DOMINADOS:
+INTELIGÊNCIA: WAIS-III (QIV+QIE+QIT, scatter>15=sig), WISC-IV (ICV/IRP/IMO/IVP, discrepâncias críticas), WMT-2, CPM-Raven, SON-R, BETA-III, Columbia, BINAUT, TIAH/S
+DESENVOLVIMENTO: Bayley-III, IDADI, Vineland-3 (ICAG, 4 domínios), EFA
+LEITURA/ESCRITA: ANELE 1-4 (PCFO/T-NAR/TEPPE/TLPP), PROLEC, PROLEC-SE-R, TDE-II, PRONUMERO, TISD
+MEMÓRIA: RAVLT (curva T1-T5, interferência, retenção T7/T5, reconhecimento), TEPIC-M-2, TIME-R
+ATENÇÃO: BPA-2 (AS/AD/AA/AC), TAVIS-4 (omissões/comissões/variabilidade), D2-R, TEACO/TEADI/TEALT
+FUNÇÕES EXECUTIVAS: FDT (inibição=contagem-leitura, alternância), Torre de Londres, BDEFS
+TEA: M-CHAT, PROTEA-R-NV, ADOS-2 M2/M3/M4 (AS+CRR≥7=autismo,≥4=espectro), SRS-2, ATA, ASSQ, AQ, RAADS-R-BR(≥65=pos), CAT-Q, QA16+, Cambridge EQ/SQ, ABC-ICA
+TDAH: SNAP-IV(≥2.0=pos), ETDAH-PAIS/AD, ASQ, ASRS-18(≥4 partA=pos), BAARS-IV, BDEFS
+EMOCIONAL: BAI, BDI-II, SCARED, EBADEP-IJ/A, HUMOR-IJ/U
+PERSONALIDADE: BFP, EPQ-IJ, PFISTER, QCP/PBQ
+SENSORIAL: Perfil Sensorial 2 (Evitação/Sensível/Observador/Buscador)
+SOCIAL: IHS-2, SRS-2, TIAH/S
+
+CONVERGÊNCIAS DIAGNÓSTICAS:
+- DISLEXIA: ANELE1(PC<25)+TLPP lento+TEPPE erros fonológicos+TDE-II leitura baixa/aritmética ok+TISD pos+WISC IVP baixo
+- TDAH escolar: SNAP-IV pos(pais+prof)+WISC IMO/IVP baixos+BPA-2 rebaixada+TAVIS-4+FDT custo inibição
+- TDAH adulto: ASRS-18+BAARS-IV(T>65)+BDEFS+scatter WAIS+D2-R rebaixado
+- TEA: ADOS-2 pos+rastreio pos(SRS/ATA/ASSQ/RAADS)+Vineland comprometida+Perfil Sensorial
+- TEA camuflagem: CAT-Q elevado+RAADS elevado+SRS moderado+ADOS borderline
+
+COMO RESPONDER:
+1. Identifique instrumentos e normalize dados
+2. Analise subteste por subteste com interpretação clínica
+3. Analise padrões e convergências entre testes
+4. Identifique dissociações clínicas
+5. Formule perfil cognitivo-comportamental integrado
+6. Hipóteses diagnósticas com CID-11/DSM-5-TR
+7. Anamnese funcional — impacto no cotidiano, escola, trabalho
+8. Recomendações de intervenção e encaminhamentos
+
+Se receber arquivo PDF ou Word, extraia e analise todos os dados. Seja preciso, ancore nos escores. Nunca generalize — o laudo é sempre individualizado.`;
+
 app.get('/health', function (req, res) {
   res.json({ status: 'ok', model: 'gemini-2.0-flash', time: new Date().toISOString() });
 });
@@ -38,34 +81,28 @@ app.post('/api/chat', async function (req, res) {
       return res.status(400).json({ error: 'Campo "messages" ausente ou inválido.' });
     }
 
-    const systemText = req.body.system || '';
-    const messages   = req.body.messages;
+    // Usa o system prompt compacto do servidor (ignora o gigante enviado pelo frontend)
+    const messages = req.body.messages;
 
-    // ── Monta o array contents para o Gemini ──────────────────────────────
-    // O Gemini não aceita mensagens "system" diretamente no array contents.
-    // Injetamos o system prompt como primeira instrução, apenas na primeira
-    // mensagem do usuário (evita reenvio gigante em cada turno).
-    const contents = messages.map(function (m, index) {
-      let text = m.content || '';
-
-      if (index === 0 && m.role === 'user' && systemText) {
-        text = '=== INSTRUÇÕES DO SISTEMA ===\n' + systemText + '\n\n=== MENSAGEM DO USUÁRIO ===\n' + text;
-      }
-
+    // Converte para formato Gemini — role "assistant" vira "model"
+    const contents = messages.map(function (m) {
       return {
         role:  m.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: text }]
+        parts: [{ text: m.content || '' }]
       };
     });
 
-    // ── Chamada à API nativa do Gemini ────────────────────────────────────
+    // Usa systemInstruction separado (campo nativo do Gemini, não conta no contexto da mesma forma)
     const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=' + apiKey;
 
     const geminiRes = await fetch(url, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        contents: contents,
+        systemInstruction: {
+          parts: [{ text: NEURO_SYSTEM }]
+        },
+        contents:          contents,
         generationConfig: {
           maxOutputTokens: 4096,
           temperature:     0.3
@@ -75,56 +112,42 @@ app.post('/api/chat', async function (req, res) {
 
     const data = await geminiRes.json();
 
-    // ── Tratamento de erros ───────────────────────────────────────────────
     if (!geminiRes.ok) {
-      const status  = geminiRes.status;
-      const errMsg  = data?.error?.message || JSON.stringify(data);
+      const status = geminiRes.status;
+      const errMsg = data?.error?.message || JSON.stringify(data);
+      console.error('Gemini ' + status + ':', errMsg);
 
-      console.error('Erro Gemini ' + status + ':', errMsg);
-
-      let userFacing = '';
-
+      let userMsg = '';
       if (status === 429) {
-        userFacing =
-          'Limite de requisições do Gemini atingido (erro 429). ' +
-          'O plano gratuito permite 15 req/min e 1.500 req/dia. ' +
-          'Aguarde 1 minuto e tente novamente.';
-      } else if (status === 400) {
-        userFacing = 'Requisição inválida para o Gemini (400): ' + errMsg;
+        userMsg = 'Limite de requisições atingido (429). Aguarde 1 minuto e tente novamente.';
       } else if (status === 403) {
-        userFacing = 'Chave de API inválida ou sem permissão (403). Verifique GEMINI_API_KEY no Render.';
-      } else if (status === 404) {
-        userFacing = 'Modelo não encontrado (404). Verifique o nome do modelo no servidor.';
+        userMsg = 'Chave inválida ou sem permissão (403). Verifique GEMINI_API_KEY no Render.';
+      } else if (status === 400) {
+        userMsg = 'Requisição inválida (400): ' + errMsg;
       } else {
-        userFacing = 'Gemini retornou erro ' + status + ': ' + errMsg;
+        userMsg = 'Erro ' + status + ': ' + errMsg;
       }
 
-      return res.status(status).json({ error: userFacing });
+      return res.status(status).json({ error: userMsg });
     }
 
-    // ── Extrai texto da resposta ──────────────────────────────────────────
     const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
 
     if (!text) {
-      // Pode ser bloqueio por safety filters
-      const blockReason = data?.promptFeedback?.blockReason || '';
-      const finishReason = data?.candidates?.[0]?.finishReason || '';
-      console.error('Resposta vazia. blockReason:', blockReason, 'finishReason:', finishReason);
+      const block  = data?.promptFeedback?.blockReason || '';
+      const finish = data?.candidates?.[0]?.finishReason || '';
       return res.status(500).json({
-        error: 'Gemini retornou resposta vazia.' +
-               (blockReason ? ' Motivo de bloqueio: ' + blockReason : '') +
-               (finishReason ? ' Fim por: ' + finishReason : '')
+        error: 'Resposta vazia do Gemini.' +
+               (block  ? ' Bloqueio: ' + block   : '') +
+               (finish ? ' Fim: '     + finish   : '')
       });
     }
 
-    // ── Retorna no formato que o app.js já sabe parsear ───────────────────
-    res.json({
-      content: [{ type: 'text', text: text }]
-    });
+    res.json({ content: [{ type: 'text', text: text }] });
 
   } catch (error) {
     console.error('Erro interno:', error);
-    res.status(500).json({ error: 'Erro interno do servidor: ' + error.message });
+    res.status(500).json({ error: 'Erro interno: ' + error.message });
   }
 });
 
